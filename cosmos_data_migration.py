@@ -8,12 +8,13 @@ from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosHttpRespons
 from dotenv import load_dotenv
 from tqdm import tqdm
 from tenacity import retry, stop_after_attempt, wait_exponential
+from azure.cosmos.exceptions import CosmosHttpResponseError
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(filename='migration.log', level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
+# Configure logging to log to a file
+logging.basicConfig(filename='not_migrated_items.log', level=logging.WARNING, format='%(asctime)s %(message)s')
 
 # Configuration for source and destination Cosmos DB
 source_config = {
@@ -38,16 +39,19 @@ def get_cosmos_client(config):
 
 def get_container(client, database_name, container_name):
     """
-    Get and return a container client for the specified database and container.
+    Get a container from the specified database.
     """
     database = client.get_database_client(database_name)
-    return database.get_container_client(container_name)
+    container = database.get_container_client(container_name)
+    return container
 
 def count_items(container):
     """
-    Count and return the number of items in the specified container.
+    Count the number of items in the specified container.
     """
-    return len(list(container.read_all_items()))
+    query = "SELECT VALUE COUNT(1) FROM c"
+    items = list(container.query_items(query=query, enable_cross_partition_query=True))
+    return items[0] if items else 0
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
 def upsert_item_with_retry(container, item):
@@ -60,24 +64,31 @@ def upsert_item_with_retry(container, item):
         logging.error(f"Failed to upsert item with id {item['id']}: {e}")
         raise
 
-def migrate_data(source_container, destination_container, batch_size=100):
-    """
-    Migrate data from the source container to the destination container.
-    Uses batch processing to handle large datasets efficiently.
-    """
-    count = 0
-    query = "SELECT * FROM c"
-    items = source_container.query_items(query=query, enable_cross_partition_query=True, max_item_count=batch_size)
-    for item in tqdm(items, desc="Migrating items"):
+from azure.cosmos.exceptions import CosmosHttpResponseError
+import logging
+
+# Configure logging to log to a file
+logging.basicConfig(filename='not_migrated_items.log', level=logging.WARNING, format='%(asctime)s %(message)s')
+
+def migrate_data(source_container, destination_container, batch_size):
+    items = source_container.read_all_items(max_item_count=batch_size)
+    not_migrated_items = []
+    for item in items:
         try:
-            upsert_item_with_retry(destination_container, item)
-            count += 1
-        except CosmosResourceExistsError:
-            logging.warning(f"Item with id {item['id']} already exists in the destination container. Skipping.")
-        except Exception as e:
-            logging.error(f"Failed to migrate item with id {item['id']}: {e}")
-    logging.info(f"Data migration completed successfully. {count} items migrated.")
-    print(f"Data migration completed successfully. {count} items migrated.")
+            destination_container.create_item(body=item)
+        except CosmosHttpResponseError as e:
+            if e.status_code == 409:  # Conflict
+                logging.warning(f"Item with id {item['id']} already exists in the destination container.")
+                not_migrated_items.append(item)
+            else:
+                logging.error(f"Failed to create item with id {item['id']}: {e}")
+                raise
+        yield item
+    # Log not migrated items to a file
+    with open('not_migrated_items.log', 'a') as log_file:
+        for item in not_migrated_items:
+            log_file.write(f"Item with id {item['id']} already exists in the destination container.\n")
+    return not_migrated_items
 
 def verify_data(source_container, destination_container):
     """
@@ -86,11 +97,14 @@ def verify_data(source_container, destination_container):
     source_count = count_items(source_container)
     destination_count = count_items(destination_container)
     if source_count == destination_count:
-        logging.info("Data verification successful. Source and destination containers have the same number of items.")
-        print("Data verification successful. Source and destination containers have the same number of items.")
+        validation_result = "Data verification successful. Source and destination containers have the same number of items."
+        logging.info(validation_result)
+        print(validation_result)
     else:
-        logging.error(f"Data verification failed. Source has {source_count} items, but destination has {destination_count} items.")
-        print(f"Data verification failed. Source has {source_count} items, but destination has {destination_count} items.")
+        validation_result = f"Data verification failed. Source has {source_count} items, but destination has {destination_count} items."
+        logging.error(validation_result)
+        print(validation_result)
+    return validation_result
 
 def main():
     """
