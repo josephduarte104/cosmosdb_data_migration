@@ -1,0 +1,22 @@
+# Ignore environment variable files
+.env
+
+# Ignore Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ignore virtual environment directories
+venv/
+.venv/
+
+# Ignore log files
+*.log
+
+# Ignore migration log file
+migration.log
+
+# Ignore other sensitive files
+*.key
+*.pem
+*.crt

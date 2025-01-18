@@ -1,0 +1,4 @@
+azure-cosmos==4.2.0
+python-dotenv==0.19.2
+tqdm==4.62.3
+tenacity==8.0.1
