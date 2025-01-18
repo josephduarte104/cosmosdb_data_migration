@@ -10,11 +10,23 @@ from tqdm import tqdm
 from tenacity import retry, stop_after_attempt, wait_exponential
 from azure.cosmos.exceptions import CosmosHttpResponseError
 
+# Ensure the log directory exists
+log_directory = os.path.dirname(os.path.abspath('migration.log'))
+if not os.path.exists(log_directory):
+    os.makedirs(log_directory)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.ERROR,
+    format='%(asctime)s %(levelname)s:%(message)s',
+    handlers=[
+        logging.FileHandler('migration.log'),
+        logging.StreamHandler()
+    ]
+)
+
 # Load environment variables from .env file
 load_dotenv()
-
-# Configure logging to log to a file
-logging.basicConfig(filename='not_migrated_items.log', level=logging.WARNING, format='%(asctime)s %(message)s')
 
 # Configuration for source and destination Cosmos DB
 source_config = {
@@ -67,9 +79,6 @@ def upsert_item_with_retry(container, item):
 from azure.cosmos.exceptions import CosmosHttpResponseError
 import logging
 
-# Configure logging to log to a file
-logging.basicConfig(filename='not_migrated_items.log', level=logging.WARNING, format='%(asctime)s %(message)s')
-
 def migrate_data(source_container, destination_container, batch_size):
     items = source_container.read_all_items(max_item_count=batch_size)
     not_migrated_items = []
@@ -85,7 +94,7 @@ def migrate_data(source_container, destination_container, batch_size):
                 raise
         yield item
     # Log not migrated items to a file
-    with open('not_migrated_items.log', 'a') as log_file:
+    with open('not_migrated_items.txt', 'a') as log_file:
         for item in not_migrated_items:
             log_file.write(f"Item with id {item['id']} already exists in the destination container.\n")
     return not_migrated_items

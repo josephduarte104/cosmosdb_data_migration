@@ -1,11 +1,29 @@
-from flask import Flask, request, render_template, jsonify
-from flask_socketio import SocketIO, emit
+from flask import Flask, request, render_template
+from flask_socketio import SocketIO
 import logging
 import time
-from cosmos_data_migration import get_cosmos_client, get_container, count_items, migrate_data, verify_data
+from cosmos_data_migration import get_cosmos_client, get_container, count_items, migrate_data
+import os
 
 app = Flask(__name__)
 socketio = SocketIO(app)
+
+# Ensure the log directory exists
+log_directory = os.path.dirname(os.path.abspath('migration.log'))
+if not os.path.exists(log_directory):
+    os.makedirs(log_directory)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s:%(message)s',
+    handlers=[
+        logging.FileHandler('migration.log'),
+        logging.StreamHandler()
+    ]
+)
+
+logging.info("Logging is configured.")
 
 # Global variable to store migration status
 migration_status = {
@@ -34,6 +52,13 @@ def index():
             'container_name': request.form['destination_container_name']
         }
         batch_size = int(request.form['batch_size'])
+
+        # Log form data
+        source_config_log = {k: v for k, v in source_config.items() if k != 'key'}
+        destination_config_log = {k: v for k, v in destination_config.items() if k != 'key'}
+        logging.info(f"Source Config: {source_config_log}")
+        logging.info(f"Destination Config: {destination_config_log}")
+        logging.info(f"Batch Size: {batch_size}")
 
         # Store the configurations in the global status
         migration_status['source_config'] = source_config
@@ -76,10 +101,12 @@ def migrate(source_config, destination_config, batch_size):
             migration_status['progress'] = progress
             socketio.emit('update', {'progress': migration_status['progress'], 'progress_percentage': progress_percentage})
             if item in not_migrated_items:
-                migration_status['not_migrated_items'].append(item)
+                not_migrated_items.append(item)
+                
+        # Calculate duration
         end_time = time.time()
         duration = end_time - start_time
-        final_progress = f"Data migration completed successfully. {source_count} items migrated."
+        final_progress = f"Data migration completed successfully in {duration:.2f} seconds. {source_count} items migrated."
         logging.info(final_progress)
         migration_status['progress'] = final_progress
         socketio.emit('update', {'progress': migration_status['progress'], 'progress_percentage': 100})
