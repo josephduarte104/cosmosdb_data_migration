@@ -2,6 +2,7 @@ from flask import Flask, request, render_template
 from flask_socketio import SocketIO
 import logging
 import time
+import datetime
 from cosmos_data_migration import get_cosmos_client, get_container, count_items, migrate_data
 from werkzeug.exceptions import BadRequest
 import os
@@ -132,53 +133,62 @@ def migrate(source_config, destination_config, batch_size):
         # Retrieve all items from the source container
         source_items = list(source_container.read_all_items())
         progress_percentage = 0
+        successfully_migrated_count = 0
 
-        for i, item in enumerate(source_items):
-            if item_exists_in_target(item, destination_container):
-                message = f"File {item['id']} already exists in target, skipping."
-                logging.info(message)
-                socketio.emit('update', {
-                    'progress': migration_status['progress'],
-                    'progress_percentage': progress_percentage,
-                    'file_exists': message
-                })
-                continue
+        # Open the skipped files log
+        with open('skipped_files.txt', 'a') as skipped_files_log:
+            migration_date_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            skipped_files_log.write(f"Migration Date and Time: {migration_date_time}\n")
 
-            try:
-                # Migration logic for items that do not exist in the target
-                destination_container.create_item(body=item)
-            except Exception as e:
-                if 'Conflict' in str(e):
-                    message = f"Conflict: File {item['id']} already exists in target, skipping."
+            for i, item in enumerate(source_items):
+                if item_exists_in_target(item, destination_container):
+                    message = f"File {item['id']} already exists in target, skipping."
                     logging.info(message)
+                    skipped_files_log.write(f"Skipped File ID: {item['id']}\n")
                     socketio.emit('update', {
                         'progress': migration_status['progress'],
                         'progress_percentage': progress_percentage,
                         'file_exists': message
                     })
                     continue
-                else:
-                    raise e
 
-            # Update progress
-            progress_percentage = (i + 1) / source_count * 100
-            migration_status['progress'] = f"Migrating item {i + 1} of {source_count}"
+                try:
+                    # Migration logic for items that do not exist in the target
+                    destination_container.create_item(body=item)
+                    successfully_migrated_count += 1
+                except Exception as e:
+                    if 'Conflict' in str(e):
+                        message = f"Conflict: File {item['id']} already exists in target, skipping."
+                        logging.info(message)
+                        skipped_files_log.write(f"Skipped File ID: {item['id']}\n")
+                        socketio.emit('update', {
+                            'progress': migration_status['progress'],
+                            'progress_percentage': progress_percentage,
+                            'file_exists': message
+                        })
+                        continue
+                    else:
+                        raise e
+
+                # Update progress
+                progress_percentage = (i + 1) / source_count * 100
+                migration_status['progress'] = f"Migrating item {i + 1} of {source_count}"
+                socketio.emit('update', {
+                    'progress': migration_status['progress'],
+                    'progress_percentage': progress_percentage
+                })
+
+            # Final progress update
+            final_progress = f"Data migration completed successfully. {successfully_migrated_count} items migrated."
+            logging.info(final_progress)
+            migration_status['progress'] = final_progress
             socketio.emit('update', {
                 'progress': migration_status['progress'],
-                'progress_percentage': progress_percentage
+                'progress_percentage': 100
             })
 
-        # Final progress update
-        final_progress = f"Data migration completed successfully. {source_count} items migrated."
-        logging.info(final_progress)
-        migration_status['progress'] = final_progress
-        socketio.emit('update', {
-            'progress': migration_status['progress'],
-            'progress_percentage': 100
-        })
-
-        # Start validation in a separate background task
-        socketio.start_background_task(validate_data, source_container, destination_container)
+            # Start validation in a separate background task
+            socketio.start_background_task(validate_data, source_container, destination_container)
     except Exception as e:
         logging.error(f"Error during migration: {e}")
         migration_status['errors'] = str(e)
