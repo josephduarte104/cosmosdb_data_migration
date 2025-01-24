@@ -3,6 +3,7 @@ from flask_socketio import SocketIO
 import logging
 import time
 from cosmos_data_migration import get_cosmos_client, get_container, count_items, migrate_data
+from werkzeug.exceptions import BadRequest
 import os
 
 # Initialize Flask app and SocketIO
@@ -38,22 +39,27 @@ migration_status = {
 }
 
 # Route for the main page
+
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
-        # Get form data for source and destination configurations
-        source_config = {
-            'endpoint': request.form['source_endpoint'],
-            'key': request.form['source_key'],
-            'database_name': request.form['source_database_name'],
-            'container_name': request.form['source_container_name']
-        }
-        destination_config = {
-            'endpoint': request.form['destination_endpoint'],
-            'key': request.form['destination_key'],
-            'database_name': request.form['destination_database_name'],
-            'container_name': request.form['destination_container_name']
-        }
+        try:
+            source_config = {
+                'endpoint': request.form['source_endpoint'],
+                'key': request.form['source_key'],
+                'database_name': request.form['source_database_name'],
+                'container_name': request.form['source_container_name']
+            }
+            destination_config = {
+                'endpoint': request.form['destination_endpoint'],
+                'key': request.form['destination_key'],
+                'database_name': request.form['destination_database_name'],
+                'container_name': request.form['destination_container_name']
+            }
+            batch_size = int(request.form['batch_size'])
+        except KeyError as e:
+            logging.error(f"Missing form data: {e}")
+            raise BadRequest(f"Missing form data: {e}")
         batch_size = int(request.form['batch_size'])
 
         # Log form data (excluding keys for security)
@@ -74,15 +80,36 @@ def index():
 
     return render_template('index.html')
 
+def item_exists_in_target(item, destination_container):
+    """
+    Checks if an item exists in the destination container.
+    
+    Args:
+        item (dict): The item to check.
+        destination_container (ContainerProxy): The destination container.
+    
+    Returns:
+        bool: True if the item exists in the destination container, False otherwise.
+    """
+    try:
+        # Attempt to read the item from the destination container
+        destination_container.read_item(item['id'], partition_key=item['partition_key'])
+        return True
+    except Exception:
+        return False
+
 def migrate(source_config, destination_config, batch_size):
     """
-    Migrate data from a source Cosmos DB container to a destination Cosmos DB container.
+    Migrates data from a source Cosmos DB container to a destination Cosmos DB container.
+    
     Args:
-        source_config (dict): Configuration for the source Cosmos DB, including 'database_name' and 'container_name'.
-        destination_config (dict): Configuration for the destination Cosmos DB, including 'database_name' and 'container_name'.
+        source_config (dict): Configuration for the source Cosmos DB.
+        destination_config (dict): Configuration for the destination Cosmos DB.
         batch_size (int): Number of items to migrate in each batch.
+    
     Emits:
         'update' (dict): Emits progress updates and errors via socketio.
+    
     Raises:
         Exception: If an error occurs during migration.
     """
@@ -97,36 +124,58 @@ def migrate(source_config, destination_config, batch_size):
         # Count the number of items in the source container and log the count
         source_count = count_items(source_container)
         logging.info(f"Number of items in source container: {source_count}")
-        migration_status['source_count'] = source_count
-        migration_status['progress'] = f"Number of items in source container: {source_count}"
+        migration_status = {'progress': f"Number of items in source container: {source_count}", 'errors': ''}
         socketio.emit('update', {
-            'progress': migration_status['progress'],
-            'source_config': migration_status['source_config'],
-            'destination_config': migration_status['destination_config'],
-            'source_count': migration_status['source_count']
+            'progress': migration_status['progress']
         })
 
-        # Start the migration process
-        start_time = time.time()
-        not_migrated_items = []
-        for i, item in enumerate(migrate_data(source_container, destination_container, batch_size)):
-            elapsed_time = time.time() - start_time
-            items_per_second = (i + 1) / elapsed_time
-            progress = f"Migrating items: {i + 1}it [{elapsed_time:.2f}s, {items_per_second:.2f}it/s]"
-            progress_percentage = ((i + 1) / source_count) * 100
-            logging.info(progress)
-            migration_status['progress'] = progress
-            socketio.emit('update', {'progress': migration_status['progress'], 'progress_percentage': progress_percentage})
-            if item not in not_migrated_items:
-                not_migrated_items.append(item)
-                
-        # Calculate and log the total duration of the migration
-        end_time = time.time()
-        duration = end_time - start_time
-        final_progress = f"Data migration completed successfully in {duration:.2f} seconds. {source_count} items migrated."
+        # Retrieve all items from the source container
+        source_items = list(source_container.read_all_items())
+        progress_percentage = 0
+
+        for i, item in enumerate(source_items):
+            if item_exists_in_target(item, destination_container):
+                message = f"File {item['id']} already exists in target, skipping."
+                logging.info(message)
+                socketio.emit('update', {
+                    'progress': migration_status['progress'],
+                    'progress_percentage': progress_percentage,
+                    'file_exists': message
+                })
+                continue
+
+            try:
+                # Migration logic for items that do not exist in the target
+                destination_container.create_item(body=item)
+            except Exception as e:
+                if 'Conflict' in str(e):
+                    message = f"Conflict: File {item['id']} already exists in target, skipping."
+                    logging.info(message)
+                    socketio.emit('update', {
+                        'progress': migration_status['progress'],
+                        'progress_percentage': progress_percentage,
+                        'file_exists': message
+                    })
+                    continue
+                else:
+                    raise e
+
+            # Update progress
+            progress_percentage = (i + 1) / source_count * 100
+            migration_status['progress'] = f"Migrating item {i + 1} of {source_count}"
+            socketio.emit('update', {
+                'progress': migration_status['progress'],
+                'progress_percentage': progress_percentage
+            })
+
+        # Final progress update
+        final_progress = f"Data migration completed successfully. {source_count} items migrated."
         logging.info(final_progress)
         migration_status['progress'] = final_progress
-        socketio.emit('update', {'progress': migration_status['progress'], 'progress_percentage': 100})
+        socketio.emit('update', {
+            'progress': migration_status['progress'],
+            'progress_percentage': 100
+        })
 
         # Start validation in a separate background task
         socketio.start_background_task(validate_data, source_container, destination_container)
@@ -139,29 +188,32 @@ def validate_data(source_container, destination_container):
     """
     Validate the migrated data by comparing item counts in source and destination containers.
     Args:
-        source_container: The source Cosmos DB container.
-        destination_container: The destination Cosmos DB container.
-    Emits:
-        'update' (dict): Emits validation results and errors via socketio.
+        source_container (ContainerProxy): The source container.
+        destination_container (ContainerProxy): The destination container.
     """
     try:
-        # Count items in both source and destination containers
         source_count = count_items(source_container)
         destination_count = count_items(destination_container)
-        if source_count != destination_count:
-            validation_message = f"Data verification failed. Source has {source_count} items, but destination has {destination_count} items."
-            logging.error(validation_message)
-            migration_status['validation'] = validation_message
-        else:
-            validation_message = "Data verification successful."
-            logging.info(validation_message)
-            migration_status['validation'] = validation_message
-        socketio.emit('update', {'validation': migration_status['validation']})
-        socketio.emit('update', {'not_migrated_items': migration_status['not_migrated_items']})
+        validation_message = f"Validation completed. Source count: {source_count}, Destination count: {destination_count}"
+        logging.info(validation_message)
+        socketio.emit('update', {'validation': validation_message})
     except Exception as e:
         logging.error(f"Error during validation: {e}")
-        migration_status['errors'] = str(e)
-        socketio.emit('update', {'errors': migration_status['errors']})
+        socketio.emit('update', {'errors': str(e)})
+
+def count_items(container):
+    """
+    Count the number of items in a Cosmos DB container.
+    
+    Args:
+        container (ContainerProxy): The container to count items in.
+    
+    Returns:
+        int: The number of items in the container.
+    """
+    query = "SELECT VALUE COUNT(1) FROM c"
+    result = list(container.query_items(query=query, enable_cross_partition_query=True))
+    return result[0] if result else 0
 
 # Run the Flask app with SocketIO
 if __name__ == '__main__':

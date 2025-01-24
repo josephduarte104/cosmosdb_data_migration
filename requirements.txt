@@ -11,3 +11,4 @@ tqdm==4.62.3
 tenacity==8.0.1
 gevent==21.8.0
 gevent-websocket==0.10.1
+tenacity==8.0.1

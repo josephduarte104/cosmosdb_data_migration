@@ -8,7 +8,7 @@ from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosHttpRespons
 from dotenv import load_dotenv
 from tqdm import tqdm
 from tenacity import retry, stop_after_attempt, wait_exponential
-from azure.cosmos.exceptions import CosmosHttpResponseError
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Ensure the log directory exists
 log_directory = os.path.dirname(os.path.abspath('migration.log'))
@@ -76,11 +76,7 @@ def upsert_item_with_retry(container, item):
         logging.error(f"Failed to upsert item with id {item['id']}: {e}")
         raise
 
-from azure.cosmos.exceptions import CosmosHttpResponseError
-import logging
-
-def migrate_data(source_container, destination_container, batch_size):
-    items = source_container.read_all_items(max_item_count=batch_size)
+def migrate_batch(source_container, destination_container, items):
     not_migrated_items = []
     for item in items:
         try:
@@ -92,7 +88,22 @@ def migrate_data(source_container, destination_container, batch_size):
             else:
                 logging.error(f"Failed to create item with id {item['id']}: {e}")
                 raise
-        yield item
+    return not_migrated_items
+
+def migrate_data(source_container, destination_container, batch_size, max_workers, socketio=None):
+    items = list(source_container.read_all_items(max_item_count=batch_size))
+    not_migrated_items = []
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(migrate_batch, source_container, destination_container, items[i:i + batch_size])
+                   for i in range(0, len(items), batch_size)]
+        
+        for i, future in enumerate(tqdm(as_completed(futures), total=len(futures), desc="Migrating data")):
+            not_migrated_items.extend(future.result())
+            if socketio:
+                progress = (i + 1) / len(futures) * 100
+                socketio.emit('update', {'progress': f"Migrating data: {progress:.2f}%"})
+
     # Log not migrated items to a file
     with open('not_migrated_items.txt', 'a') as log_file:
         for item in not_migrated_items:
@@ -121,9 +132,11 @@ def main():
     """
     parser = argparse.ArgumentParser(description='Migrate data from one Cosmos DB container to another.')
     parser.add_argument('--batch-size', type=int, default=100, help='Number of items to process in each batch.')
+    parser.add_argument('--max-workers', type=int, default=4, help='Maximum number of worker threads.')
     args = parser.parse_args()
 
     batch_size = args.batch_size
+    max_workers = args.max_workers
 
     # Source Cosmos DB client and container
     source_client = get_cosmos_client(source_config)
@@ -140,7 +153,7 @@ def main():
 
     # Migrate data
     start_time = time.time()
-    migrate_data(source_container, destination_container, batch_size)
+    migrate_data(source_container, destination_container, batch_size, max_workers)
     end_time = time.time()
     duration = end_time - start_time
     logging.info(f"Data migration took {duration:.2f} seconds.")
