@@ -104,10 +104,6 @@ def migrate_data(source_container, destination_container, batch_size, max_worker
                 progress = (i + 1) / len(futures) * 100
                 socketio.emit('update', {'progress': f"Migrating data: {progress:.2f}%"})
 
-    # Log not migrated items to a file
-    with open('not_migrated_items.txt', 'a') as log_file:
-        for item in not_migrated_items:
-            log_file.write(f"Item with id {item['id']} already exists in the destination container.\n")
     return not_migrated_items
 
 def verify_data(source_container, destination_container):

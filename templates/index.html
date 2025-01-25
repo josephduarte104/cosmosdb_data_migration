@@ -69,6 +69,10 @@
             margin-top: 10px;
             color: #555;
         }
+        #elapsed-time {
+            margin-top: 10px;
+            color: #555;
+        }
         #validation {
             margin-top: 10px;
             color: #555;
@@ -87,7 +91,7 @@
 <body>
     <div class="container">
         <h1>Azure Cosmos Database Data Migration</h1>
-        <form method="POST">
+        <form id="migration-form">
             <label for="source_endpoint">Source Endpoint</label>
             <input type="text" id="source_endpoint" name="source_endpoint" required>
             
@@ -121,6 +125,7 @@
             <div id="progress-bar-inner"></div>
         </div>
         <p id="progress"></p>
+        <p id="elapsed-time">Elapsed time: 0 seconds</p>
         <p id="validation">Validation result will be displayed here.</p>
         <p id="errors"></p>
         <ul id="not-migrated-items"></ul>
@@ -128,7 +133,9 @@
     <script>
         document.addEventListener('DOMContentLoaded', (event) => {
             var socket = io();
-    
+            var startTime;
+            var timerInterval;
+
             socket.on('update', function(data) {
                 if (data.progress) {
                     document.getElementById('progress').innerText = data.progress;
@@ -136,27 +143,53 @@
                 if (data.progress_percentage) {
                     document.getElementById('progress-bar-inner').style.width = data.progress_percentage + '%';
                 }
+                if (data.start_time) {
+                    startTime = data.start_time;
+                    clearInterval(timerInterval);
+                    timerInterval = setInterval(() => {
+                        var elapsedTime = Math.round((Date.now() / 1000) - startTime);
+                        document.getElementById('elapsed-time').innerText = 'Elapsed time: ' + elapsedTime + ' seconds';
+                    }, 1000);
+                }
+                if (data.elapsed_time) {
+                    var elapsedTime = Math.round(data.elapsed_time);
+                    document.getElementById('elapsed-time').innerText = 'Elapsed time: ' + elapsedTime + ' seconds';
+                }
+                if (data.progress_percentage === 100) {
+                    clearInterval(timerInterval);
+                }
                 if (data.validation) {
                     document.getElementById('validation').innerText = data.validation;
-                }
-                if (data.not_migrated_items) {
-                    var notMigratedList = document.getElementById('not-migrated-items');
-                    notMigratedList.innerHTML = '';
-                    data.not_migrated_items.forEach(function(item) {
-                        var li = document.createElement('li');
-                        li.textContent = item;
-                        notMigratedList.appendChild(li);
-                    });
                 }
                 if (data.errors) {
                     document.getElementById('errors').innerText = data.errors;
                 }
-                if (data.file_exists) {
-                    var fileExistsMessage = document.createElement('p');
-                    fileExistsMessage.style.color = 'orange';
-                    fileExistsMessage.innerText = data.file_exists;
-                    document.getElementById('progress').appendChild(fileExistsMessage);
-                }
+            });
+
+            document.getElementById('migration-form').addEventListener('submit', function(event) {
+                event.preventDefault();
+                var formData = new FormData(event.target);
+                var jsonData = {};
+                formData.forEach((value, key) => jsonData[key] = value);
+
+                fetch('/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(jsonData)
+                }).then(response => response.json())
+                  .then(data => {
+                      if (data.status === 'Migration started') {
+                          document.getElementById('progress').innerText = 'Migration started';
+                          startTime = Date.now() / 1000;
+                          clearInterval(timerInterval);
+                          timerInterval = setInterval(() => {
+                              var elapsedTime = Math.round((Date.now() / 1000) - startTime);
+                              document.getElementById('elapsed-time').innerText = 'Elapsed time: ' + elapsedTime + ' seconds';
+                          }, 1000);
+                      }
+                  });
             });
         });
     </script>
